@@ -38,7 +38,7 @@ def parse_acceptance_rate(log_path: str) -> float | None:
         return None
     pattern = re.compile(r"draft acceptance rate = ([\d.]+)")
     last = None
-    with open(log_path) as f:
+    with open(log_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             m = pattern.search(line)
             if m:
