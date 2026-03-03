@@ -238,176 +238,163 @@ def generate_chart(results: list[dict], output_path: str, metadata: dict = None)
     hardware = metadata.get("hardware", "Unknown Hardware")
     backend = metadata.get("backend", "unknown")
     model_family = metadata.get("model_family", "")
-    chart_title = f"Speculative Decoding Benchmark"
     chart_subtitle = f"{model_family} on {hardware} ({backend})".strip()
 
-    # Group results by target
-    targets_seen = []
+    # Collect unique targets and drafts, preserving the order they appear in results
+    # (which matches config order).
+    targets_seen = list(dict.fromkeys(r["target"] for r in results))
+    drafts_seen = list(dict.fromkeys(r["draft"] for r in results if r["draft"] is not None))
+
+    # Fast lookup: (target, draft_or_None) -> result dict
+    result_map: dict[tuple, dict] = {}
     for r in results:
-        if r["target"] not in targets_seen:
-            targets_seen.append(r["target"])
+        if "error" not in r:
+            result_map[(r["target"], r.get("draft"))] = r
 
-    # Build baseline map
-    baseline_map = {}
-    for r in results:
-        if r["draft"] is None and "error" not in r:
-            baseline_map[r["target"]] = r["mean_tps"]
+    # Color palette — cycles if there are more drafts than colors
+    PALETTE = [
+        "#EF553B", "#00CC96", "#AB63FA", "#FFA15A", "#19D3F3",
+        "#FF6692", "#B6E880", "#FF97FF", "#FECB52", "#636EFA",
+    ]
+    BASELINE_COLOR = "#636EFA"
+    draft_colors = {d: PALETTE[i % len(PALETTE)] for i, d in enumerate(drafts_seen)}
 
-    # Categorize drafts by size
-    def get_draft_size(draft_name: str) -> str:
-        if draft_name.startswith("0.5B"):
-            return "0.5B"
-        elif draft_name.startswith("1.5B"):
-            return "1.5B"
-        elif draft_name.startswith("3B"):
-            return "3B"
-        elif draft_name.startswith("7B"):
-            return "7B"
-        elif draft_name.startswith("14B"):
-            return "14B"
-        return "Other"
+    def wall_speedup(target: str, draft: str) -> float | None:
+        """Wall-time speedup % of draft vs baseline. None if data is missing."""
+        base = result_map.get((target, None), {}).get("wall_time", 0)
+        draft_r = result_map.get((target, draft), {}).get("wall_time", 0)
+        if base > 0 and draft_r > 0:
+            return round((base - draft_r) / base * 100, 1)
+        return None
 
-    # Find best draft for each size category per target
-    size_categories = ["0.5B", "1.5B", "3B", "7B", "14B"]
-    best_by_size = {target: {} for target in targets_seen}
-
-    for r in results:
-        if r["draft"] is None or "error" in r:
-            continue
-        target = r["target"]
-        size = get_draft_size(r["draft"])
-        if size not in best_by_size[target] or r["mean_tps"] > best_by_size[target][size]["mean_tps"]:
-            best_by_size[target][size] = r
-
-    # Build summary bar chart traces (baseline + best per size)
-    colors = {
-        "Baseline": "#636EFA",
-        "0.5B": "#EF553B",
-        "1.5B": "#00CC96",
-        "3B": "#AB63FA",
-        "7B": "#FFA15A",
-        "14B": "#19D3F3",
-    }
-
-    summary_traces = []
-
-    # Baseline trace
-    summary_traces.append({
+    # --- Chart 1: Mean total time per request (lower is better) ---
+    time_traces = [{
         "x": targets_seen,
-        "y": [baseline_map.get(t, 0) for t in targets_seen],
-        "text": [f"{baseline_map.get(t, 0):.1f}" for t in targets_seen],
+        "y": [result_map.get((t, None), {}).get("mean_total_time", 0) for t in targets_seen],
+        "text": [f"{result_map.get((t, None), {}).get('mean_total_time', 0):.1f}s" for t in targets_seen],
         "textposition": "outside",
         "name": "Baseline (no draft)",
         "type": "bar",
-        "marker": {"color": colors["Baseline"]},
-    })
-
-    # Best draft per size category
-    for size in size_categories:
-        y_vals = []
-        text_vals = []
-        hover_vals = []
-        has_data = False
-        for target in targets_seen:
-            if size in best_by_size[target]:
-                r = best_by_size[target][size]
-                y_vals.append(r["mean_tps"])
-                acc = r.get("acceptance_rate", 0) or 0
-                text_vals.append(f"{r['mean_tps']:.1f}")
-                hover_vals.append(f"{r['draft']}<br>{r['mean_tps']:.1f} tok/s<br>{acc:.0%} acceptance")
-                has_data = True
+        "marker": {"color": BASELINE_COLOR},
+    }]
+    for draft in drafts_seen:
+        y_vals, text_vals, hover_vals = [], [], []
+        for t in targets_seen:
+            r = result_map.get((t, draft))
+            if r:
+                v = r.get("mean_total_time", 0)
+                acc = r.get("acceptance_rate") or 0
+                y_vals.append(v)
+                text_vals.append(f"{v:.1f}s")
+                hover_vals.append(f"{draft}<br>{v:.2f}s avg response<br>{acc:.0%} acceptance")
             else:
-                y_vals.append(0)
+                y_vals.append(None)
                 text_vals.append("")
                 hover_vals.append("")
+        time_traces.append({
+            "x": targets_seen, "y": y_vals, "text": text_vals,
+            "textposition": "outside", "hovertext": hover_vals, "hoverinfo": "text",
+            "name": draft, "type": "bar", "marker": {"color": draft_colors[draft]},
+        })
 
-        if has_data:
-            summary_traces.append({
-                "x": targets_seen,
-                "y": y_vals,
-                "text": text_vals,
-                "textposition": "outside",
-                "hovertext": hover_vals,
-                "hoverinfo": "text",
-                "name": f"Best {size} Draft",
-                "type": "bar",
-                "marker": {"color": colors.get(size, "#888")},
-            })
-
-    # Build speedup bar chart (best per size)
+    # --- Chart 2: Wall-time speedup vs baseline (%) ---
     speedup_traces = []
-    for size in size_categories:
-        y_vals = []
-        text_vals = []
-        hover_vals = []
+    for draft in drafts_seen:
+        y_vals, text_vals, hover_vals = [], [], []
         has_data = False
-        for target in targets_seen:
-            base = baseline_map.get(target, 0)
-            if size in best_by_size[target] and base > 0:
-                r = best_by_size[target][size]
-                speedup = (r["mean_tps"] - base) / base * 100
-                y_vals.append(round(speedup, 1))
-                acc = r.get("acceptance_rate", 0) or 0
-                text_vals.append(f"+{speedup:.0f}%")
-                hover_vals.append(f"{r['draft']}<br>+{speedup:.1f}% speedup<br>{acc:.0%} acceptance")
+        for t in targets_seen:
+            sp = wall_speedup(t, draft)
+            r = result_map.get((t, draft), {})
+            acc = r.get("acceptance_rate") or 0
+            if sp is not None:
+                sign = "+" if sp >= 0 else ""
+                y_vals.append(sp)
+                text_vals.append(f"{sign}{sp:.0f}%")
+                hover_vals.append(f"{draft}<br>{sign}{sp:.1f}% wall-time speedup<br>{acc:.0%} acceptance")
                 has_data = True
             else:
-                y_vals.append(0)
+                y_vals.append(None)
                 text_vals.append("")
                 hover_vals.append("")
-
         if has_data:
             speedup_traces.append({
-                "x": targets_seen,
-                "y": y_vals,
-                "text": text_vals,
-                "textposition": "outside",
-                "hovertext": hover_vals,
-                "hoverinfo": "text",
-                "name": f"Best {size} Draft",
-                "type": "bar",
-                "marker": {"color": colors.get(size, "#888")},
+                "x": targets_seen, "y": y_vals, "text": text_vals,
+                "textposition": "outside", "hovertext": hover_vals, "hoverinfo": "text",
+                "name": draft, "type": "bar", "marker": {"color": draft_colors[draft]},
             })
 
-    # Build heatmap data (all drafts)
-    drafts_seen = []
-    for r in results:
-        if r["draft"] and r["draft"] not in drafts_seen:
-            drafts_seen.append(r["draft"])
-
-    # Sort drafts by size then quant
-    def draft_sort_key(d):
-        size_order = {"0.5B": 0, "1.5B": 1, "3B": 2, "7B": 3, "14B": 4}
-        size = get_draft_size(d)
-        return (size_order.get(size, 99), d)
-
-    drafts_seen.sort(key=draft_sort_key)
-
-    heatmap_z = []
-    heatmap_text = []
+    # --- Chart 3: Draft acceptance rate (%) ---
+    accept_traces = []
     for draft in drafts_seen:
-        row = []
-        text_row = []
-        for target in targets_seen:
-            match = [r for r in results if r["target"] == target and r["draft"] == draft and "error" not in r]
-            base = baseline_map.get(target, 0)
-            if match and base > 0:
-                speedup = (match[0]["mean_tps"] - base) / base * 100
-                row.append(round(speedup, 1))
-                acc = match[0].get("acceptance_rate", 0) or 0
-                text_row.append(f"+{speedup:.0f}%<br>{acc:.0%} acc")
+        y_vals, text_vals = [], []
+        has_data = False
+        for t in targets_seen:
+            r = result_map.get((t, draft))
+            if r and r.get("acceptance_rate") is not None:
+                acc = r["acceptance_rate"]
+                y_vals.append(round(acc * 100, 1))
+                text_vals.append(f"{acc:.0%}")
+                has_data = True
             else:
-                row.append(None)
-                text_row.append("")
-        heatmap_z.append(row)
-        heatmap_text.append(text_row)
+                y_vals.append(None)
+                text_vals.append("")
+        if has_data:
+            accept_traces.append({
+                "x": targets_seen, "y": y_vals, "text": text_vals,
+                "textposition": "outside",
+                "name": draft, "type": "bar", "marker": {"color": draft_colors[draft]},
+            })
 
-    summary_json = json.dumps(summary_traces)
-    speedup_json = json.dumps(speedup_traces)
-    heatmap_z_json = json.dumps(heatmap_z)
-    heatmap_text_json = json.dumps(heatmap_text)
-    targets_json = json.dumps(targets_seen)
-    drafts_json = json.dumps(drafts_seen)
+    # --- Heatmap: wall-time speedup for every draft × target combo ---
+    heatmap_z = []
+    heatmap_customdata = []  # acceptance rate, surfaced via hovertemplate
+    for draft in drafts_seen:
+        row, cdata_row = [], []
+        for t in targets_seen:
+            sp = wall_speedup(t, draft)
+            r = result_map.get((t, draft), {})
+            acc = r.get("acceptance_rate")
+            row.append(sp)
+            cdata_row.append(round(acc * 100, 1) if acc is not None else None)
+        heatmap_z.append(row)
+        heatmap_customdata.append(cdata_row)
+
+    # Compute colorscale bounds from actual data
+    flat_z = [v for row in heatmap_z for v in row if v is not None]
+    if flat_z:
+        z_lo, z_hi = min(flat_z), max(flat_z)
+        # Symmetric around 0 when negatives exist so the neutral colour sits at 0
+        if z_lo < 0:
+            bound = max(abs(z_lo), abs(z_hi))
+            z_lo, z_hi = -bound, bound
+        # Pad slightly and snap to a round number
+        z_lo = min(z_lo - 5, -5)
+        z_hi = max(z_hi + 5, 5)
+        tick_step = max(10, round((z_hi - z_lo) / 5 / 10) * 10)
+        tick_vals = list(range(int(z_lo), int(z_hi) + 1, tick_step))
+        tick_text = [f"{v:+d}%" for v in tick_vals]
+    else:
+        z_lo, z_hi = -50, 100
+        tick_vals = [-50, -25, 0, 25, 50, 75, 100]
+        tick_text = [f"{v:+d}%" for v in tick_vals]
+
+    # Layout helpers derived from actual content
+    num_drafts = len(drafts_seen)
+    heatmap_height = max(400, num_drafts * 40 + 120)
+    left_margin = max(120, max((len(d) for d in drafts_seen), default=10) * 8)
+
+    # Serialise everything for the template
+    time_json             = json.dumps(time_traces)
+    speedup_json          = json.dumps(speedup_traces)
+    accept_json           = json.dumps(accept_traces)
+    heatmap_z_json        = json.dumps(heatmap_z)
+    heatmap_customdata_json = json.dumps(heatmap_customdata)
+    targets_json          = json.dumps(targets_seen)
+    drafts_json           = json.dumps(drafts_seen)
+    z_lo_json             = json.dumps(z_lo)
+    z_hi_json             = json.dumps(z_hi)
+    tick_vals_json        = json.dumps(tick_vals)
+    tick_text_json        = json.dumps(tick_text)
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -424,17 +411,8 @@ def generate_chart(results: list[dict], output_path: str, metadata: dict = None)
             background: #1a1a2e;
             color: #eee;
         }}
-        h1 {{
-            text-align: center;
-            color: #fff;
-            margin-bottom: 10px;
-        }}
-        h2 {{
-            text-align: center;
-            color: #888;
-            font-weight: normal;
-            margin-top: 0;
-        }}
+        h1 {{ text-align: center; color: #fff; margin-bottom: 10px; }}
+        h2 {{ text-align: center; color: #888; font-weight: normal; margin-top: 0; }}
         .chart {{
             background: #16213e;
             border-radius: 12px;
@@ -448,24 +426,39 @@ def generate_chart(results: list[dict], output_path: str, metadata: dict = None)
             margin-bottom: 10px;
             padding-left: 10px;
         }}
+        .chart-note {{
+            color: #666;
+            font-size: 0.85em;
+            padding-left: 10px;
+            margin-bottom: 6px;
+        }}
     </style>
 </head>
 <body>
-    <h1>{chart_title}</h1>
+    <h1>Speculative Decoding Benchmark</h1>
     <h2>{chart_subtitle}</h2>
 
     <div class="chart">
-        <div class="chart-title">Throughput Comparison (tokens/sec)</div>
-        <div id="summary-chart"></div>
+        <div class="chart-title">Mean Response Time (seconds) — lower is better</div>
+        <div class="chart-note">Average total inference time per request</div>
+        <div id="time-chart"></div>
     </div>
 
     <div class="chart">
-        <div class="chart-title">Speedup vs Baseline (%)</div>
+        <div class="chart-title">Wall-Time Speedup vs Baseline — higher is better</div>
+        <div class="chart-note">Based on total wall time across all benchmark runs</div>
         <div id="speedup-chart"></div>
     </div>
 
     <div class="chart">
-        <div class="chart-title">Full Results Heatmap (% Speedup)</div>
+        <div class="chart-title">Draft Acceptance Rate — higher is better</div>
+        <div class="chart-note">Fraction of draft tokens accepted by the target model</div>
+        <div id="accept-chart"></div>
+    </div>
+
+    <div class="chart">
+        <div class="chart-title">Full Results Heatmap — wall-time speedup %</div>
+        <div class="chart-note">Hover for acceptance rate. Red = slower than baseline.</div>
         <div id="heatmap-chart"></div>
     </div>
 
@@ -478,79 +471,85 @@ def generate_chart(results: list[dict], output_path: str, metadata: dict = None)
             yaxis: {{ gridcolor: '#2a3a5e' }},
         }};
 
-        var summaryTraces = {summary_json};
-        Plotly.newPlot('summary-chart', summaryTraces, {{
+        var barDefaults = {{
             ...darkLayout,
             barmode: 'group',
-            yaxis: {{ ...darkLayout.yaxis, title: 'Tokens per Second' }},
-            legend: {{ orientation: 'h', y: -0.15, font: {{ color: '#eee' }} }},
-            margin: {{ b: 80, t: 20 }},
+            legend: {{ orientation: 'h', y: -0.2, font: {{ color: '#eee' }} }},
+            margin: {{ b: 100, t: 20 }},
             height: 400,
+        }};
+
+        Plotly.newPlot('time-chart', {time_json}, {{
+            ...barDefaults,
+            yaxis: {{ ...darkLayout.yaxis, title: 'Seconds per Request', rangemode: 'tozero' }},
         }}, {{ responsive: true }});
 
-        var speedupTraces = {speedup_json};
-        Plotly.newPlot('speedup-chart', speedupTraces, {{
-            ...darkLayout,
-            barmode: 'group',
-            yaxis: {{ ...darkLayout.yaxis, title: 'Speedup (%)' }},
-            legend: {{ orientation: 'h', y: -0.15, font: {{ color: '#eee' }} }},
-            margin: {{ b: 80, t: 20 }},
-            height: 400,
+        Plotly.newPlot('speedup-chart', {speedup_json}, {{
+            ...barDefaults,
+            yaxis: {{ ...darkLayout.yaxis, title: 'Wall-Time Speedup (%)' }},
             shapes: [{{
                 type: 'line', x0: 0, x1: 1, xref: 'paper',
                 y0: 0, y1: 0, yref: 'y',
-                line: {{ color: '#666', width: 2, dash: 'dash' }}
-            }}]
+                line: {{ color: '#555', width: 2, dash: 'dash' }}
+            }}],
+        }}, {{ responsive: true }});
+
+        Plotly.newPlot('accept-chart', {accept_json}, {{
+            ...barDefaults,
+            yaxis: {{ ...darkLayout.yaxis, title: 'Acceptance Rate (%)', range: [0, 105] }},
         }}, {{ responsive: true }});
 
         var heatmapTrace = [{{
             z: {heatmap_z_json},
             x: {targets_json},
             y: {drafts_json},
-            hovertemplate: '<b>%{{y}}</b> → %{{x}}<br>Speedup: <b>%{{z:.1f}}%</b><extra></extra>',
+            customdata: {heatmap_customdata_json},
+            hovertemplate: (
+                '<b>%{{y}}</b> \u2192 %{{x}}<br>' +
+                'Speedup: <b>%{{z:.1f}}%</b><br>' +
+                'Acceptance: <b>%{{customdata:.1f}}%</b>' +
+                '<extra></extra>'
+            ),
             type: 'heatmap',
             colorscale: [
-                [0, '#dc3545'],
+                [0,   '#dc3545'],
                 [0.4, '#fd7e14'],
                 [0.5, '#ffc107'],
                 [0.7, '#28a745'],
-                [1, '#00ff88']
+                [1,   '#00ff88'],
             ],
-            zmin: 0,
-            zmax: 85,
+            zmin: {z_lo_json},
+            zmax: {z_hi_json},
             colorbar: {{
                 title: 'Speedup %',
-                tickfont: {{ color: '#eee', size: 14 }},
-                titlefont: {{ color: '#eee', size: 14 }},
-                tickvals: [0, 20, 40, 60, 80],
-                ticktext: ['0%', '+20%', '+40%', '+60%', '+80%'],
-                len: 0.9
+                tickfont:  {{ color: '#eee', size: 12 }},
+                titlefont: {{ color: '#eee', size: 13 }},
+                tickvals: {tick_vals_json},
+                ticktext: {tick_text_json},
+                len: 0.9,
             }},
             hoverongaps: false,
             xgap: 2,
-            ygap: 1,
+            ygap: 2,
         }}];
-
-        var numDrafts = {drafts_json}.length;
-        var heatmapHeight = Math.max(500, numDrafts * 22 + 100);
 
         Plotly.newPlot('heatmap-chart', heatmapTrace, {{
             ...darkLayout,
             xaxis: {{
                 ...darkLayout.xaxis,
                 side: 'top',
-                tickfont: {{ size: 14, color: '#eee' }},
-                tickangle: 0
+                tickfont: {{ size: 13, color: '#eee' }},
+                tickangle: 0,
             }},
             yaxis: {{
                 ...darkLayout.yaxis,
                 title: '',
                 autorange: 'reversed',
                 tickfont: {{ size: 12, color: '#eee' }},
-                dtick: 1
+                dtick: 1,
             }},
-            margin: {{ l: 100, t: 50, b: 20, r: 100 }},
-            height: heatmapHeight,
+            margin: {{ l: {left_margin}, t: 60, b: 20, r: 100 }},
+            height: {heatmap_height},
         }}, {{ responsive: true }});
     </script>
 </body>
