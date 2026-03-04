@@ -52,6 +52,7 @@ def run_single(
     label: str,
     settings: dict,
     backend_type: str = "llamacpp",
+    draft_method: str = "draft_model",
 ) -> dict:
     """Start a server, benchmark it, stop it, and return result dict."""
     t_wall_start = time.monotonic()
@@ -63,6 +64,7 @@ def run_single(
         backend = VLLMBackend(
             model=target_path,
             draft_model=draft_path,
+            draft_method=draft_method,
             host="0.0.0.0",
             port=port,
             num_speculative_tokens=settings.get("num_speculative_tokens", 5),
@@ -172,7 +174,7 @@ def run_sweep(config: dict, results_path: str) -> list[dict]:
         else:
             print(f"[{run_idx}/{total_runs}] {target_label} (baseline)")
             try:
-                result = run_single(target_path, None, f"{target_label} baseline", settings, backend_type)
+                result = run_single(target_path, None, f"{target_label} baseline", settings, backend_type, "draft_model")
             except Exception as e:
                 print(f"  SKIPPED: {e}")
                 # Skip all drafts for this target since we have no baseline
@@ -200,7 +202,7 @@ def run_sweep(config: dict, results_path: str) -> list[dict]:
 
             print(f"[{run_idx}/{total_runs}] {combo_label}")
             try:
-                result = run_single(target_path, draft_path, combo_label, settings, backend_type)
+                result = run_single(target_path, draft_path, combo_label, settings, backend_type, draft.get("method", "draft_model"))
             except Exception as e:
                 print(f"  SKIPPED: {e}\n")
                 continue

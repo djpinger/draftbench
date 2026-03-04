@@ -241,6 +241,7 @@ class VLLMBackend(ServerBackend):
         self,
         model: str,
         draft_model: str | None = None,
+        draft_method: str = "draft_model",
         host: str = "0.0.0.0",
         port: int = 8000,
         num_speculative_tokens: int = 5,
@@ -249,6 +250,7 @@ class VLLMBackend(ServerBackend):
         super().__init__(host, port)
         self.model = model
         self.draft_model = draft_model
+        self.draft_method = draft_method
         self.num_speculative_tokens = num_speculative_tokens
         self.extra_args = extra_args or []
 
@@ -262,6 +264,7 @@ class VLLMBackend(ServerBackend):
         ]
         if self.draft_model:
             spec_config = {
+                "method": self.draft_method,
                 "model": self.draft_model,
                 "num_speculative_tokens": self.num_speculative_tokens,
             }
