@@ -29,6 +29,31 @@ from server import LlamaCppBackend, VLLMBackend
 
 
 # ---------------------------------------------------------------------------
+# Tee — mirror stdout to a log file
+# ---------------------------------------------------------------------------
+
+class _Tee:
+    """Write to both the original stdout and a log file simultaneously."""
+
+    def __init__(self, log_path: str):
+        self._stdout = sys.stdout
+        self._log = open(log_path, "a", encoding="utf-8", buffering=1)
+        sys.stdout = self
+
+    def write(self, data):
+        self._stdout.write(data)
+        self._log.write(data)
+
+    def flush(self):
+        self._stdout.flush()
+        self._log.flush()
+
+    def close(self):
+        sys.stdout = self._stdout
+        self._log.close()
+
+
+# ---------------------------------------------------------------------------
 # Sweep runner
 # ---------------------------------------------------------------------------
 
@@ -594,10 +619,6 @@ def _generate_output_paths(config: dict) -> tuple[str, str]:
 
 def _run_config_file(config_path: str, results_path: str | None = None, chart_path: str | None = None):
     """Run a single config file and generate charts."""
-    print(f"\n{'#'*60}")
-    print(f"  Loading config: {config_path}")
-    print(f"{'#'*60}")
-
     with open(config_path) as f:
         config = json.load(f)
 
@@ -605,14 +626,25 @@ def _run_config_file(config_path: str, results_path: str | None = None, chart_pa
     auto_results, auto_chart = _generate_output_paths(config)
     results_path = results_path or auto_results
     chart_path = chart_path or auto_chart
+    log_path = results_path.replace(".json", ".log")
 
-    results = run_sweep(config, results_path)
+    tee = _Tee(log_path)
+    try:
+        print(f"\n{'#'*60}")
+        print(f"  Loading config: {config_path}")
+        print(f"  Log: {log_path}")
+        print(f"{'#'*60}")
 
-    print(f"\n{'='*60}")
-    print(f"  Sweep complete. Results saved to {results_path}")
-    print(f"{'='*60}\n")
+        results = run_sweep(config, results_path)
 
-    generate_chart(results, chart_path, config)
+        print(f"\n{'='*60}")
+        print(f"  Sweep complete. Results saved to {results_path}")
+        print(f"{'='*60}\n")
+
+        generate_chart(results, chart_path, config)
+    finally:
+        tee.close()
+
     return results_path, chart_path
 
 
