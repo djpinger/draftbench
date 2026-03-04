@@ -64,15 +64,24 @@ mkdir -p ~/draftbench/models
 # Download models (hf = huggingface-cli)
 pip install huggingface-hub
 
-# Qwen3-14B-AWQ (target)
+# Target: Qwen3-14B-AWQ (~8 GB)
+# https://huggingface.co/Qwen/Qwen3-14B-AWQ
 hf download Qwen/Qwen3-14B-AWQ --local-dir ~/draftbench/models/Qwen3-14B-AWQ
 
-# EAGLE3 draft
+# Draft: EAGLE3 speculative model (~1 GB)
+# https://huggingface.co/yuhuili/EAGLE3-Qwen3-14B-Instruct
 hf download yuhuili/EAGLE3-Qwen3-14B-Instruct --local-dir ~/draftbench/models/Qwen3-14B-eagle3
 
-# Standard draft models
+# Draft: Qwen3-1.7B (~4 GB)
+# https://huggingface.co/Qwen/Qwen3-1.7B
 hf download Qwen/Qwen3-1.7B --local-dir ~/draftbench/models/Qwen3-1.7B
+
+# Draft: Qwen3-4B-AWQ (~3 GB)
+# https://huggingface.co/Qwen/Qwen3-4B-AWQ
 hf download Qwen/Qwen3-4B-AWQ --local-dir ~/draftbench/models/Qwen3-4B-AWQ
+
+# Draft: Qwen3-8B-AWQ (~5 GB)
+# https://huggingface.co/Qwen/Qwen3-8B-AWQ
 hf download Qwen/Qwen3-8B-AWQ --local-dir ~/draftbench/models/Qwen3-8B-AWQ
 ```
 
