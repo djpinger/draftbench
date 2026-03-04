@@ -128,6 +128,7 @@ def run_single(
             num_speculative_tokens=settings.get("num_speculative_tokens", 5),
             extra_args=settings.get("extra_args", []),
             log_file=log_file,
+            docker_image=settings.get("docker_image"),
         )
         model_name = target_path
     else:

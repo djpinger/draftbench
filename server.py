@@ -235,7 +235,12 @@ class LMStudioBackend(ServerBackend):
 # ---------------------------------------------------------------------------
 
 class VLLMBackend(ServerBackend):
-    """Launches vLLM's OpenAI-compatible server."""
+    """Launches vLLM's OpenAI-compatible server.
+
+    When docker_image is set, runs via `docker run` instead of the local venv.
+    Model paths are bind-mounted into the container at the same host path so
+    config files require no changes between venv and Docker modes.
+    """
 
     def __init__(
         self,
@@ -247,6 +252,7 @@ class VLLMBackend(ServerBackend):
         num_speculative_tokens: int = 5,
         extra_args: list[str] | None = None,
         log_file: str | None = None,
+        docker_image: str | None = None,
     ):
         super().__init__(host, port)
         self.model = model
@@ -255,13 +261,15 @@ class VLLMBackend(ServerBackend):
         self.num_speculative_tokens = num_speculative_tokens
         self.extra_args = extra_args or []
         self.log_file = log_file
+        self.docker_image = docker_image
+        self._container_name = f"draftbench_{port}"
 
-    def _build_cmd(self) -> list[str]:
+    def _vllm_args(self) -> list[str]:
+        """Build the vLLM-specific arguments (shared between venv and Docker modes)."""
         import json
-        cmd = [
-            sys.executable, "-m", "vllm.entrypoints.openai.api_server",
+        args = [
             "--model", self.model,
-            "--host", self.host,
+            "--host", "0.0.0.0",
             "--port", str(self.port),
         ]
         if self.draft_model:
@@ -270,13 +278,45 @@ class VLLMBackend(ServerBackend):
                 "model": self.draft_model,
                 "num_speculative_tokens": self.num_speculative_tokens,
             }
-            cmd += ["--speculative-config", json.dumps(spec_config)]
-        cmd += self.extra_args
+            args += ["--speculative-config", json.dumps(spec_config)]
+        args += self.extra_args
+        return args
+
+    def _build_cmd(self) -> list[str]:
+        if self.docker_image:
+            return self._build_docker_cmd()
+        return [sys.executable, "-m", "vllm.entrypoints.openai.api_server"] + self._vllm_args()
+
+    def _build_docker_cmd(self) -> list[str]:
+        # Bind-mount the parent directory of each model path so container paths match host paths
+        mount_dirs: set[str] = set()
+        for path in [self.model, self.draft_model]:
+            if path:
+                mount_dirs.add(os.path.dirname(os.path.abspath(path)))
+
+        cmd = [
+            "docker", "run", "--rm", "--gpus", "all",
+            "--name", self._container_name,
+            "-p", f"{self.port}:{self.port}",
+        ]
+        for d in sorted(mount_dirs):
+            cmd += ["-v", f"{d}:{d}"]
+        cmd += [self.docker_image]
+        cmd += self._vllm_args()
         return cmd
+
+    def stop(self) -> None:
+        if self.docker_image:
+            # Ask the container to stop gracefully before killing the Popen handle
+            subprocess.run(
+                ["docker", "stop", self._container_name],
+                capture_output=True, timeout=30,
+            )
+        super().stop()
 
     def start(self) -> None:
         cmd = self._build_cmd()
-        label = "vLLM"
+        label = "vLLM (docker)" if self.docker_image else "vLLM"
         if self.draft_model:
             label += " (speculative)"
         print(f"  [{label}] Starting server on {self.host}:{self.port}")
