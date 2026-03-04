@@ -25,7 +25,7 @@ import time
 from datetime import datetime, timezone
 
 from bench import run_bench, PROMPTS
-from server import LlamaCppBackend
+from server import LlamaCppBackend, VLLMBackend
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +51,7 @@ def run_single(
     draft_path: str | None,
     label: str,
     settings: dict,
+    backend_type: str = "llamacpp",
 ) -> dict:
     """Start a server, benchmark it, stop it, and return result dict."""
     t_wall_start = time.monotonic()
@@ -58,16 +59,28 @@ def run_single(
     port = settings.get("port", 8080)
     log_file = os.path.join(tempfile.gettempdir(), f"draftbench_server_{port}.log")
 
-    backend = LlamaCppBackend(
-        model_path=target_path,
-        draft_path=draft_path,
-        host="127.0.0.1",
-        port=port,
-        gpu_layers=settings.get("gpu_layers", 99),
-        ctx_size=settings.get("ctx_size", 4096),
-        llama_bin=settings.get("llama_bin"),
-        log_file=log_file,
-    )
+    if backend_type == "vllm":
+        backend = VLLMBackend(
+            model=target_path,
+            draft_model=draft_path,
+            host="0.0.0.0",
+            port=port,
+            extra_args=settings.get("extra_args", []),
+        )
+        model_name = target_path
+        log_file = None
+    else:
+        backend = LlamaCppBackend(
+            model_path=target_path,
+            draft_path=draft_path,
+            host="127.0.0.1",
+            port=port,
+            gpu_layers=settings.get("gpu_layers", 99),
+            ctx_size=settings.get("ctx_size", 4096),
+            llama_bin=settings.get("llama_bin"),
+            log_file=log_file,
+        )
+        model_name = os.path.basename(target_path)
 
     backend.start()
     print(f"  Waiting for server ...")
@@ -80,7 +93,7 @@ def run_single(
     summary = run_bench(
         label=label,
         base_url=backend.base_url,
-        model=os.path.basename(target_path),
+        model=model_name,
         prompts=PROMPTS,
         runs=settings.get("runs", 1),
         max_tokens=settings.get("max_tokens", 512),
@@ -92,8 +105,8 @@ def run_single(
 
     wall_time = round(time.monotonic() - t_wall_start, 2)
 
-    # Parse acceptance rate from logs
-    acceptance = parse_acceptance_rate(log_file) if draft_path else None
+    # Parse acceptance rate from logs (llama.cpp only)
+    acceptance = parse_acceptance_rate(log_file) if (draft_path and log_file) else None
 
     tps_stat = summary.stat("tps")
     ttft_stat = summary.stat("ttft")
@@ -130,6 +143,7 @@ def run_sweep(config: dict, results_path: str) -> list[dict]:
     targets = config["targets"]
     drafts = config.get("drafts", [])
     settings = config.get("settings", {})
+    backend_type = config.get("backend", "llamacpp")
 
     total_runs = len(targets) * (1 + len(drafts))
 
@@ -157,7 +171,7 @@ def run_sweep(config: dict, results_path: str) -> list[dict]:
         else:
             print(f"[{run_idx}/{total_runs}] {target_label} (baseline)")
             try:
-                result = run_single(target_path, None, f"{target_label} baseline", settings)
+                result = run_single(target_path, None, f"{target_label} baseline", settings, backend_type)
             except Exception as e:
                 print(f"  SKIPPED: {e}")
                 # Skip all drafts for this target since we have no baseline
@@ -185,7 +199,7 @@ def run_sweep(config: dict, results_path: str) -> list[dict]:
 
             print(f"[{run_idx}/{total_runs}] {combo_label}")
             try:
-                result = run_single(target_path, draft_path, combo_label, settings)
+                result = run_single(target_path, draft_path, combo_label, settings, backend_type)
             except Exception as e:
                 print(f"  SKIPPED: {e}\n")
                 continue

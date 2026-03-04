@@ -144,10 +144,12 @@ def stream_chat_completion(
                 continue
             delta = choices[0].get("delta", {})
             content = delta.get("content")
-            if content:
+            reasoning = delta.get("reasoning_content")
+            if content or reasoning:
                 if first_token_time is None:
                     first_token_time = time.perf_counter()
-                token_count += 1
+                if content:
+                    token_count += 1
 
     t_end = time.perf_counter()
 
