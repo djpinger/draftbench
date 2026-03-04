@@ -65,6 +65,7 @@ def run_single(
             draft_model=draft_path,
             host="0.0.0.0",
             port=port,
+            num_speculative_tokens=settings.get("num_speculative_tokens", 5),
             extra_args=settings.get("extra_args", []),
         )
         model_name = target_path

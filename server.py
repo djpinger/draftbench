@@ -243,14 +243,17 @@ class VLLMBackend(ServerBackend):
         draft_model: str | None = None,
         host: str = "0.0.0.0",
         port: int = 8000,
+        num_speculative_tokens: int = 5,
         extra_args: list[str] | None = None,
     ):
         super().__init__(host, port)
         self.model = model
         self.draft_model = draft_model
+        self.num_speculative_tokens = num_speculative_tokens
         self.extra_args = extra_args or []
 
     def _build_cmd(self) -> list[str]:
+        import json
         cmd = [
             sys.executable, "-m", "vllm.entrypoints.openai.api_server",
             "--model", self.model,
@@ -258,7 +261,11 @@ class VLLMBackend(ServerBackend):
             "--port", str(self.port),
         ]
         if self.draft_model:
-            cmd += ["--speculative-model", self.draft_model]
+            spec_config = {
+                "model": self.draft_model,
+                "num_speculative_tokens": self.num_speculative_tokens,
+            }
+            cmd += ["--speculative-config", json.dumps(spec_config)]
         cmd += self.extra_args
         return cmd
 
