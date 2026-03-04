@@ -10,8 +10,7 @@ env/
 .env
 
 # Results and charts (regenerable)
-# results/*.json
-# results/*.html
+results/
 
 # Logs
 *.log
@@ -31,5 +30,6 @@ Thumbs.db
 *.gguf
 models/
 
-# Personal sweep configs (use example_sweep.json as template)
-configs/sweep_*.json
+# Configs (use example_sweep.json as template)
+configs/*.json
+!configs/example_sweep.json
