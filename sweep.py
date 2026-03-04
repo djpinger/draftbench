@@ -48,6 +48,9 @@ class _Tee:
         self._stdout.flush()
         self._log.flush()
 
+    def fileno(self):
+        return self._stdout.fileno()
+
     def close(self):
         sys.stdout = self._stdout
         self._log.close()
