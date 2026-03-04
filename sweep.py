@@ -74,6 +74,36 @@ def parse_acceptance_rate(log_path: str) -> float | None:
     return last
 
 
+def parse_vllm_spec_metrics(log_path: str) -> dict | None:
+    """Extract speculative decoding metrics from the last vLLM SpecDecoding log line.
+
+    Parses lines like:
+      SpecDecoding metrics: Mean acceptance length: 1.63, ...,
+        Per-position acceptance rate: 0.459, 0.126, 0.022, 0.015, 0.007,
+        Avg Draft acceptance rate: 12.6%
+    """
+    if not log_path or not os.path.isfile(log_path):
+        return None
+    pattern = re.compile(
+        r"SpecDecoding metrics:.*?"
+        r"Mean acceptance length:\s*([\d.]+).*?"
+        r"Per-position acceptance rate:\s*([\d.,\s]+?),?\s*"
+        r"Avg Draft acceptance rate:\s*([\d.]+)%"
+    )
+    last = None
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            m = pattern.search(line)
+            if m:
+                per_pos = [float(x.strip()) for x in m.group(2).split(",") if x.strip()]
+                last = {
+                    "mean_acceptance_length": float(m.group(1)),
+                    "per_position_acceptance_rates": per_pos,
+                    "acceptance_rate": round(float(m.group(3)) / 100.0, 4),
+                }
+    return last
+
+
 def run_single(
     target_path: str,
     draft_path: str | None,
@@ -97,9 +127,9 @@ def run_single(
             port=port,
             num_speculative_tokens=settings.get("num_speculative_tokens", 5),
             extra_args=settings.get("extra_args", []),
+            log_file=log_file,
         )
         model_name = target_path
-        log_file = None
     else:
         backend = LlamaCppBackend(
             model_path=target_path,
@@ -136,8 +166,15 @@ def run_single(
 
     wall_time = round(time.monotonic() - t_wall_start, 2)
 
-    # Parse acceptance rate from logs (llama.cpp only)
-    acceptance = parse_acceptance_rate(log_file) if (draft_path and log_file) else None
+    # Parse acceptance metrics from server logs
+    spec_metrics = None
+    if draft_path and log_file:
+        if backend_type == "vllm":
+            spec_metrics = parse_vllm_spec_metrics(log_file)
+        else:
+            acc = parse_acceptance_rate(log_file)
+            if acc is not None:
+                spec_metrics = {"acceptance_rate": round(acc, 4)}
 
     tps_stat = summary.stat("tps")
     ttft_stat = summary.stat("ttft")
@@ -149,7 +186,9 @@ def run_single(
         "mean_ttft": round(ttft_stat.get("mean", 0), 3),
         "mean_total_time": round(total_stat.get("mean", 0), 2),
         "wall_time": wall_time,
-        "acceptance_rate": round(acceptance, 4) if acceptance else None,
+        "acceptance_rate": spec_metrics.get("acceptance_rate") if spec_metrics else None,
+        "mean_acceptance_length": spec_metrics.get("mean_acceptance_length") if spec_metrics else None,
+        "per_position_acceptance_rates": spec_metrics.get("per_position_acceptance_rates") if spec_metrics else None,
     }
 
     return result
@@ -371,26 +410,55 @@ def generate_chart(results: list[dict], output_path: str, metadata: dict = None)
     # --- Chart 3: Draft acceptance rate (%) ---
     accept_traces = []
     for draft in drafts_seen:
-        y_vals, text_vals = [], []
+        y_vals, text_vals, hover_vals = [], [], []
         has_data = False
         for t in targets_seen:
             r = result_map.get((t, draft))
             if r and r.get("acceptance_rate") is not None:
                 acc = r["acceptance_rate"]
+                mal = r.get("mean_acceptance_length")
                 y_vals.append(round(acc * 100, 1))
                 text_vals.append(f"{acc:.0%}")
+                hover_part = f"<br>Mean accept len: {mal:.2f}" if mal else ""
+                hover_vals.append(f"{draft}<br>{acc:.1%} avg acceptance{hover_part}")
                 has_data = True
             else:
                 y_vals.append(None)
                 text_vals.append("")
+                hover_vals.append("")
         if has_data:
             accept_traces.append({
                 "x": targets_seen, "y": y_vals, "text": text_vals,
-                "textposition": "outside",
+                "textposition": "outside", "hovertext": hover_vals, "hoverinfo": "text",
                 "name": draft, "type": "bar", "marker": {"color": draft_colors[draft]},
             })
 
-    # --- Heatmap: wall-time speedup for every draft × target combo ---
+    # --- Chart 4: Per-position acceptance rate (line chart) ---
+    pos_traces = []
+    for draft in drafts_seen:
+        # Collect per-position rates across all targets (average if multiple targets)
+        all_rates: dict[int, list[float]] = {}
+        for t in targets_seen:
+            r = result_map.get((t, draft))
+            if r and r.get("per_position_acceptance_rates"):
+                for i, v in enumerate(r["per_position_acceptance_rates"]):
+                    all_rates.setdefault(i, []).append(v)
+        if not all_rates:
+            continue
+        positions = sorted(all_rates)
+        y_vals = [round(sum(all_rates[i]) / len(all_rates[i]) * 100, 1) for i in positions]
+        pos_traces.append({
+            "x": [f"Token +{i+1}" for i in positions],
+            "y": y_vals,
+            "text": [f"{v:.1f}%" for v in y_vals],
+            "textposition": "top center",
+            "mode": "lines+markers+text",
+            "name": draft,
+            "line": {"color": draft_colors[draft], "width": 2},
+            "marker": {"size": 8},
+        })
+
+    # --- Chart 5: Heatmap: wall-time speedup for every draft × target combo ---
     heatmap_z = []
     heatmap_customdata = []  # acceptance rate, surfaced via hovertemplate
     for draft in drafts_seen:
@@ -432,6 +500,7 @@ def generate_chart(results: list[dict], output_path: str, metadata: dict = None)
     time_json             = json.dumps(time_traces)
     speedup_json          = json.dumps(speedup_traces)
     accept_json           = json.dumps(accept_traces)
+    pos_json              = json.dumps(pos_traces)
     heatmap_z_json        = json.dumps(heatmap_z)
     heatmap_customdata_json = json.dumps(heatmap_customdata)
     targets_json          = json.dumps(targets_seen)
@@ -497,8 +566,14 @@ def generate_chart(results: list[dict], output_path: str, metadata: dict = None)
 
     <div class="chart">
         <div class="chart-title">Draft Acceptance Rate — higher is better</div>
-        <div class="chart-note">Fraction of draft tokens accepted by the target model</div>
+        <div class="chart-note">Avg fraction of draft tokens accepted. Hover for mean acceptance length.</div>
         <div id="accept-chart"></div>
+    </div>
+
+    <div class="chart">
+        <div class="chart-title">Per-Position Acceptance Rate — higher is better</div>
+        <div class="chart-note">How quickly acceptance drops off across the speculative token window</div>
+        <div id="pos-chart"></div>
     </div>
 
     <div class="chart">
@@ -541,6 +616,15 @@ def generate_chart(results: list[dict], output_path: str, metadata: dict = None)
 
         Plotly.newPlot('accept-chart', {accept_json}, {{
             ...barDefaults,
+            yaxis: {{ ...darkLayout.yaxis, title: 'Acceptance Rate (%)', range: [0, 105] }},
+        }}, {{ responsive: true }});
+
+        Plotly.newPlot('pos-chart', {pos_json}, {{
+            ...darkLayout,
+            legend: {{ orientation: 'h', y: -0.2, font: {{ color: '#eee' }} }},
+            margin: {{ b: 80, t: 20 }},
+            height: 380,
+            xaxis: {{ ...darkLayout.xaxis, title: 'Speculative Token Position' }},
             yaxis: {{ ...darkLayout.yaxis, title: 'Acceptance Rate (%)', range: [0, 105] }},
         }}, {{ responsive: true }});
 

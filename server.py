@@ -246,6 +246,7 @@ class VLLMBackend(ServerBackend):
         port: int = 8000,
         num_speculative_tokens: int = 5,
         extra_args: list[str] | None = None,
+        log_file: str | None = None,
     ):
         super().__init__(host, port)
         self.model = model
@@ -253,6 +254,7 @@ class VLLMBackend(ServerBackend):
         self.draft_method = draft_method
         self.num_speculative_tokens = num_speculative_tokens
         self.extra_args = extra_args or []
+        self.log_file = log_file
 
     def _build_cmd(self) -> list[str]:
         import json
@@ -280,10 +282,17 @@ class VLLMBackend(ServerBackend):
         print(f"  [{label}] Starting server on {self.host}:{self.port}")
         print(f"  Command: {' '.join(cmd)}")
 
+        if self.log_file:
+            self._log_fh = open(self.log_file, "w")
+            out = self._log_fh
+        else:
+            self._log_fh = None
+            out = sys.stderr
+
         self._process = subprocess.Popen(
             cmd,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
+            stdout=out,
+            stderr=out,
         )
         print(f"  [{label}] Server pid={self._process.pid}")
 
